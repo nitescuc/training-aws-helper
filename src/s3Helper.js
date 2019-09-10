@@ -1,113 +1,37 @@
-const request = require('request-promise-native');
 const archiver = require('archiver');
-const { Writable } = require('stream');
+const AWS = require('aws-sdk');
+AWS.config.update({region: 'eu-west-1'});
+const s3 = new AWS.S3();
+const { PassThrough } = require('stream');
+const EventEmitter = require('events');
 
-class S3WritableStream extends Writable {
-    constructor(options) {
-        super(options);
-        this.config = options;
-        this._accumulator = [];
-        this._totalLength = 0;
-        this._partLength = 10 * 1024 * 1024;
-        this._partNumber = 0;
-    }
-    _write(chunk, encoding, callback) {
-        const cb = typeof encoding === 'function' ? encoding : callback;
-        this._accumulator.push(chunk);
-        this._totalLength += chunk.length;
-        if (this._totalLength > this._partLength) this.writePart(this._accumulator, cb);
-        else cb && cb();
-    }
-    _writev(chunks, cb) {
-        chunks.forEach(chunk => {
-            this._accumulator.push(chunk);
-            this._totalLength += chunk.length;    
-        });
-        if (this._totalLength > this._partLength) this.writePart(this._accumulator, cb);
-        else cb && cb();
-    }
-    _final(cb) {
-        this.writePart(cb, true);
-    }
-
-    async getUploadId() {
-        if (this._uploadId) return this._uploadId;
-
-        const result = JSON.parse(await request.post({
-            url: this.config.api.createUploadUrl,
-            headers: {
-                'x-api-key': this.config.api.key,
-                'content-type': 'application/json'
-            },
-            body: JSON.stringify({
-                filename: this.config.destinationFilename
-            })
-        }));
-        console.log('UploadResult', result);
-        return result.uploadId;
-    }
-    async writeChuncks() {
-        // get signedurl
-        // request put
-    }
-    async completeMultipart() {
-        const result = JSON.parse(await request.post({
-            url: this.config.api.completeUploadUrl,
-            headers: {
-                'x-api-key': this.config.api.key,
-                'content-type': 'application/json'
-            },
-            body: JSON.stringify({
-                filename: this.config.destinationFilename,
-                uploadId: this._uploadId
-            })
-        }));
-        return true;
-    }
-
-    writePart(cb, isLast) {
-        this.getUploadId()
-            .then((uploadId) => {
-                this._uploadId = uploadId;
-                return this.writeChunks();
-            })
-            .then(() => {
-                if (isLast) return this.completeMultipart();
-                else return true;
-            })
-            .then(() => {
-                this._accumulator = [];
-                this._totalLength = 0;
-                this._partNumber += 1;
-                cb && cb();
-            })
-            .catch(e => console.error('Part upload error', e));
-    }
-}
-
-class S3Helper {
+class S3Helper extends EventEmitter {
     constructor(config) {
+        super();
         this.config = config;
     }
 
     async uploadFolderToZip(sourceFolder, destinationFilename) {
-/*        const result = JSON.parse(await request.post({
-            url: this.config.apiUrl,
-            headers: {
-                'x-api-key': this.config.apiKey,
-                'content-type': 'application/json'
-            },
-            body: JSON.stringify({
-                method: 'putObject',
-                filename: destinationFilename
-            })
-        }));*/
-        return new Promise((resolve, reject) => {
-            const archive = archiver('zip');
-            archive.pipe(new S3WritableStream({ ...this.config, destinationFilename }));
-            archive.directory(sourceFolder);
-            archive.finalize();    
+        const pass = new PassThrough();
+        const uploadManager = s3.upload({
+            Bucket: this.config.Bucket,
+            Key: destinationFilename,
+            Body: pass
+        }, {
+            partSize: 10 * 1024 * 1024,
+            queueSize: 1
         });
+
+        const archive = archiver('zip');
+        archive.on('end', () => {
+            console.log('Ended', archive.pointer());
+        })
+        archive.pipe(pass);
+        archive.directory(sourceFolder);
+        archive.finalize();    
+        
+        uploadManager.on('httpUploadProgress', progress => this.emit('progress', progress));
+        return uploadManager.promise();
     }
 }
 
