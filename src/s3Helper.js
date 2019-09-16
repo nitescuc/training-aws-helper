@@ -37,30 +37,32 @@ class S3Helper extends EventEmitter {
 
     async createTrainingJob(s3Prefix) {
         const TrainingJobName = new Date().toISOString().replace(/:|\./g, '-');
+        const HyperParameters = Object.assign({}, {
+            sagemaker_region: '"eu-west-1"',
+            use_generator: 'false',
+            count_to_generate: '100',
+            slide: '2'
+        }, (this.config.HyperParameters || {}));
         const job = await sagemaker.createTrainingJob({
             AlgorithmSpecification: {
                 TrainingInputMode: 'File',
-                TrainingImage: '263430657496.dkr.ecr.eu-west-1.amazonaws.com/robocars:1.8.0-gpu-py3'
+                TrainingImage: this.config.TrainingImage
             },
             OutputDataConfig: {
-                S3OutputPath: 's3://robocars/model'
+                S3OutputPath: `s3://${this.config.Bucket}/model`
             },
             ResourceConfig: {
                 InstanceType: 'ml.p2.xlarge',
                 InstanceCount: 1,
-                VolumeSizeInGB: 1
+                VolumeSizeInGB: 5
             },
-            RoleArn: 'arn:aws:iam::263430657496:role/service-role/AmazonSageMaker-ExecutionRole-20180512T173485',
+            RoleArn: this.config.RoleArn,
             StoppingCondition: {
-                MaxRuntimeInSeconds: 3600
+                MaxRuntimeInSeconds: 3600,
+                MaxWaitTimeInSeconds: 3600
             },
             TrainingJobName,
-            HyperParameters: {
-                sagemaker_region: '"eu-west-1"',
-                use_generator: 'false',
-                count_to_generate: '100',
-                slide: '2'
-            },
+            HyperParameters,
             InputDataConfig: [{
                 ChannelName: 'train', 
                 DataSource: { 
@@ -70,7 +72,11 @@ class S3Helper extends EventEmitter {
                         S3DataDistributionType: 'FullyReplicated' 
                     }
                 } 
-            }]
+            }],
+            EnableManagedSpotTraining: this.config.EnableManagedSpotTraining,
+            CheckpointConfig: {
+                S3Uri: `s3://${this.config.Bucket}/partial`
+            }
         }).promise();
         
         const interval = setInterval(async () => {
